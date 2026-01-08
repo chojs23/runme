@@ -9,11 +9,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use markdown::CodeBlock;
 use runner::BlockReport;
 
-/// `rumne` keeps README snippets honest by parsing markdown and
+/// `runme` keeps README snippets honest by parsing markdown and
 /// executing runnable blocks inside small sandboxes (shell-only for now).
 #[derive(Parser, Debug)]
 #[command(
-    name = "rumne",
+    name = "runme",
     version,
     about = "Execute README code blocks on demand"
 )]
@@ -56,6 +56,8 @@ fn main() -> Result<()> {
     let workdir = cli
         .target
         .parent()
+        // Relative targets such as "README.md" yield an empty parent path; treat it as cwd.
+        .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 

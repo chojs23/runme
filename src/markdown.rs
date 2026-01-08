@@ -74,7 +74,7 @@ pub fn extract_blocks(markdown: &str) -> Result<Vec<CodeBlock>> {
             }
             Event::Html(html) => {
                 if is_skip_directive(&html) {
-                    pending_skip = Some("Marked with rumne:ignore".to_string());
+                    pending_skip = Some("Marked with runme:ignore".to_string());
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -173,7 +173,7 @@ fn normalize_info_string(info: &CowStr) -> Option<String> {
 
 fn is_skip_directive(html: &CowStr) -> bool {
     let normalized = html.trim().to_ascii_lowercase();
-    normalized.contains("rumne:ignore") || normalized.contains("rumne:skip")
+    normalized.contains("runme:ignore") || normalized.contains("runme:skip")
 }
 
 #[cfg(test)]
@@ -204,7 +204,7 @@ cargo test
     #[test]
     fn records_skip_directive() {
         let doc = r#"
-<!-- rumne:ignore -->
+<!-- runme:ignore -->
 ```bash
 echo off
 ```
@@ -212,7 +212,7 @@ echo off
         let blocks = extract_blocks(doc).expect("parse");
         assert_eq!(
             blocks[0].skip_reason.as_deref(),
-            Some("Marked with rumne:ignore")
+            Some("Marked with runme:ignore")
         );
     }
 }
