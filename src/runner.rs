@@ -3,6 +3,8 @@
 //! The sandbox abstraction here keeps host execution readable while preparing
 //! the ground for Docker/Wasmtime backends without touching CLI surfaces.
 
+use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -118,29 +120,51 @@ impl Sandbox for HostSandbox {
     }
 }
 
-/// Temporary docker sandbox shim that reuses host execution until container
-/// orchestration lands. This preserves the CLI contract without silently
-/// ignoring the user's requested isolation level.
+/// Docker sandbox that runs each line inside a disposable container.
+///
+/// Environment variables:
+/// - `RUNME_DOCKER_IMAGE`: override the base image (default `ubuntu:22.04`).
 pub struct DockerSandbox {
-    host_fallback: HostSandbox,
+    mount_dir: PathBuf,
+    image: String,
 }
 
 impl DockerSandbox {
     pub fn new(workdir: impl Into<PathBuf>) -> Self {
-        Self {
-            host_fallback: HostSandbox::new(workdir),
-        }
+        let workdir = workdir.into();
+        let mount_dir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
+        let image = env::var("RUNME_DOCKER_IMAGE").unwrap_or_else(|_| "ubuntu:22.04".to_string());
+        Self { mount_dir, image }
     }
 }
 
 impl Sandbox for DockerSandbox {
     fn label(&self) -> &str {
-        "docker(host-fallback)"
+        "docker"
     }
 
     fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
-        // TODO: replace with real docker invocation once image management lands.
-        self.host_fallback.run(argv)
+        let mut volume_spec = OsString::new();
+        volume_spec.push(&self.mount_dir);
+        volume_spec.push(":");
+        volume_spec.push("/workspace");
+
+        let mut cmd = Command::new("docker");
+        cmd.arg("run")
+            .arg("--rm")
+            .arg("--network=none")
+            .arg("-v")
+            .arg(&volume_spec)
+            .arg("-w")
+            .arg("/workspace")
+            .arg(&self.image)
+            .args(argv);
+
+        let start = Instant::now();
+        let output = cmd.output().context("while invoking docker")?;
+        let duration = start.elapsed();
+
+        Ok(CommandOutcome::from_output(output, duration))
     }
 }
 

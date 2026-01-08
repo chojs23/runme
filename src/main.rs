@@ -181,7 +181,7 @@ mod tests {
 
         let docker = instantiate_sandbox(Path::new("."), SandboxChoice::Docker)
             .expect("docker sandbox exists");
-        assert_eq!(docker.label(), "docker(host-fallback)");
+        assert_eq!(docker.label(), "docker");
 
         let wasm =
             instantiate_sandbox(Path::new("."), SandboxChoice::Wasm).expect("wasm sandbox exists");
