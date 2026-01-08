@@ -4,10 +4,10 @@ mod runner;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use markdown::CodeBlock;
-use runner::BlockReport;
+use runner::{BlockReport, HostSandbox, Sandbox};
 
 /// `runme` keeps README snippets honest by parsing markdown and
 /// executing runnable blocks inside small sandboxes (shell-only for now).
@@ -21,6 +21,10 @@ struct Cli {
     /// Path to the primary README markdown file.
     #[arg(default_value = "README.md")]
     target: PathBuf,
+
+    /// Sandbox runtime to execute code blocks with.
+    #[arg(long, value_enum, default_value_t = SandboxChoice::Host)]
+    sandbox: SandboxChoice,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -47,6 +51,13 @@ enum ReportFormat {
     Json,
 }
 
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum SandboxChoice {
+    Host,
+    Docker,
+    Wasm,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let markdown = fs::read_to_string(&cli.target)
@@ -66,7 +77,9 @@ fn main() -> Result<()> {
         format: ReportFormat::Human,
     }) {
         Command::List => render_list(&blocks),
-        Command::Run { block, format } => run_blocks(&blocks, &workdir, block.as_deref(), format)?,
+        Command::Run { block, format } => {
+            run_blocks(&blocks, &workdir, block.as_deref(), cli.sandbox, format)?
+        }
     }
 
     Ok(())
@@ -94,6 +107,7 @@ fn run_blocks(
     blocks: &[CodeBlock],
     workdir: &Path,
     filter: Option<&str>,
+    sandbox_kind: SandboxChoice,
     format: ReportFormat,
 ) -> Result<()> {
     let subset: Vec<&CodeBlock> = match filter {
@@ -107,9 +121,10 @@ fn run_blocks(
         None => blocks.iter().collect(),
     };
 
+    let mut sandbox = instantiate_sandbox(workdir, sandbox_kind)?;
     let mut reports = Vec::new();
     for block in subset {
-        let report = runner::execute(block, workdir)
+        let report = runner::execute(block, sandbox.as_mut())
             .with_context(|| format!("while running {}", block.id))?;
         reports.push(report);
     }
@@ -129,10 +144,25 @@ fn run_blocks(
     Ok(())
 }
 
+fn instantiate_sandbox(workdir: &Path, kind: SandboxChoice) -> Result<Box<dyn Sandbox>> {
+    match kind {
+        SandboxChoice::Host => Ok(Box::new(HostSandbox::new(workdir))),
+        SandboxChoice::Docker => {
+            bail!("docker sandbox backend not implemented yet; TODO: add container runner")
+        }
+        SandboxChoice::Wasm => {
+            bail!("wasm sandbox backend not implemented yet; TODO: add Wasmtime runner")
+        }
+    }
+}
+
 fn print_human_report(report: &BlockReport) {
     println!("\n== {} ==", report.id);
     if let Some(lang) = &report.language {
         println!("language: {lang}");
+    }
+    if let Some(sandbox) = &report.sandbox {
+        println!("sandbox: {sandbox}");
     }
     if !report.headings.is_empty() {
         println!("context: {}", report.headings.join(" › "));
