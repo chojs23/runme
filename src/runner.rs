@@ -118,6 +118,58 @@ impl Sandbox for HostSandbox {
     }
 }
 
+/// Temporary docker sandbox shim that reuses host execution until container
+/// orchestration lands. This preserves the CLI contract without silently
+/// ignoring the user's requested isolation level.
+pub struct DockerSandbox {
+    host_fallback: HostSandbox,
+}
+
+impl DockerSandbox {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            host_fallback: HostSandbox::new(workdir),
+        }
+    }
+}
+
+impl Sandbox for DockerSandbox {
+    fn label(&self) -> &str {
+        "docker(host-fallback)"
+    }
+
+    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
+        // TODO: replace with real docker invocation once image management lands.
+        self.host_fallback.run(argv)
+    }
+}
+
+/// Placeholder Wasm sandbox that executes commands on the host until
+/// Wasmtime-based runners are ready. This keeps the API stable while we build
+/// the actual runtime adapter.
+pub struct WasmSandbox {
+    host_fallback: HostSandbox,
+}
+
+impl WasmSandbox {
+    pub fn new(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            host_fallback: HostSandbox::new(workdir),
+        }
+    }
+}
+
+impl Sandbox for WasmSandbox {
+    fn label(&self) -> &str {
+        "wasm(host-fallback)"
+    }
+
+    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
+        // TODO: spin up Wasmtime modules to execute supported languages.
+        self.host_fallback.run(argv)
+    }
+}
+
 /// Execute a parsed code block using a shell interpreter when possible.
 pub fn execute(block: &CodeBlock, sandbox: &mut dyn Sandbox) -> Result<BlockReport> {
     if let Some(reason) = block.skip_reason.clone() {

@@ -4,10 +4,10 @@ mod runner;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use markdown::CodeBlock;
-use runner::{BlockReport, HostSandbox, Sandbox};
+use runner::{BlockReport, DockerSandbox, HostSandbox, Sandbox, WasmSandbox};
 
 /// `runme` keeps README snippets honest by parsing markdown and
 /// executing runnable blocks inside small sandboxes (shell-only for now).
@@ -51,7 +51,7 @@ enum ReportFormat {
     Json,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 enum SandboxChoice {
     Host,
     Docker,
@@ -147,12 +147,45 @@ fn run_blocks(
 fn instantiate_sandbox(workdir: &Path, kind: SandboxChoice) -> Result<Box<dyn Sandbox>> {
     match kind {
         SandboxChoice::Host => Ok(Box::new(HostSandbox::new(workdir))),
-        SandboxChoice::Docker => {
-            bail!("docker sandbox backend not implemented yet; TODO: add container runner")
-        }
-        SandboxChoice::Wasm => {
-            bail!("wasm sandbox backend not implemented yet; TODO: add Wasmtime runner")
-        }
+        SandboxChoice::Docker => Ok(Box::new(DockerSandbox::new(workdir))),
+        SandboxChoice::Wasm => Ok(Box::new(WasmSandbox::new(workdir))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn sandbox_flag_defaults_to_host() {
+        let cli = Cli::try_parse_from(["runme", "list"]).expect("parse default");
+        assert_eq!(cli.sandbox, SandboxChoice::Host);
+    }
+
+    #[test]
+    fn sandbox_flag_accepts_explicit_variants() {
+        let docker =
+            Cli::try_parse_from(["runme", "--sandbox", "docker", "list"]).expect("parse docker");
+        assert_eq!(docker.sandbox, SandboxChoice::Docker);
+
+        let wasm = Cli::try_parse_from(["runme", "--sandbox", "wasm", "list"]).expect("parse wasm");
+        assert_eq!(wasm.sandbox, SandboxChoice::Wasm);
+    }
+
+    #[test]
+    fn instantiate_builds_all_backends() {
+        let host =
+            instantiate_sandbox(Path::new("."), SandboxChoice::Host).expect("host sandbox exists");
+        assert_eq!(host.label(), "host");
+
+        let docker = instantiate_sandbox(Path::new("."), SandboxChoice::Docker)
+            .expect("docker sandbox exists");
+        assert_eq!(docker.label(), "docker(host-fallback)");
+
+        let wasm =
+            instantiate_sandbox(Path::new("."), SandboxChoice::Wasm).expect("wasm sandbox exists");
+        assert_eq!(wasm.label(), "wasm(host-fallback)");
     }
 }
 
