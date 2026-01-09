@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use markdown::CodeBlock;
 use runner::{BlockReport, DockerSandbox, HostSandbox, Sandbox, WasmSandbox};
 
@@ -25,6 +25,14 @@ struct Cli {
     /// Sandbox runtime to execute code blocks with.
     #[arg(long, value_enum, default_value_t = SandboxChoice::Host)]
     sandbox: SandboxChoice,
+
+    /// Container image used when --sandbox=docker (overrides RUNME_DOCKER_IMAGE).
+    #[arg(long, value_name = "IMAGE")]
+    docker_image: Option<String>,
+
+    /// Repeatable extra arguments forwarded to `docker run`.
+    #[arg(long = "docker-arg", value_name = "ARG", action = ArgAction::Append)]
+    docker_args: Vec<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -58,6 +66,21 @@ enum SandboxChoice {
     Wasm,
 }
 
+#[derive(Clone, Debug, Default)]
+struct DockerConfig {
+    image: Option<String>,
+    extra_args: Vec<String>,
+}
+
+impl DockerConfig {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            image: cli.docker_image.clone(),
+            extra_args: cli.docker_args.clone(),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let markdown = fs::read_to_string(&cli.target)
@@ -72,14 +95,21 @@ fn main() -> Result<()> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 
+    let docker_config = DockerConfig::from_cli(&cli);
+
     match cli.command.unwrap_or_else(|| Command::Run {
         block: None,
         format: ReportFormat::Human,
     }) {
         Command::List => render_list(&blocks),
-        Command::Run { block, format } => {
-            run_blocks(&blocks, &workdir, block.as_deref(), cli.sandbox, format)?
-        }
+        Command::Run { block, format } => run_blocks(
+            &blocks,
+            &workdir,
+            block.as_deref(),
+            cli.sandbox,
+            &docker_config,
+            format,
+        )?,
     }
 
     Ok(())
@@ -108,6 +138,7 @@ fn run_blocks(
     workdir: &Path,
     filter: Option<&str>,
     sandbox_kind: SandboxChoice,
+    docker_config: &DockerConfig,
     format: ReportFormat,
 ) -> Result<()> {
     let subset: Vec<&CodeBlock> = match filter {
@@ -121,7 +152,7 @@ fn run_blocks(
         None => blocks.iter().collect(),
     };
 
-    let mut sandbox = instantiate_sandbox(workdir, sandbox_kind)?;
+    let mut sandbox = instantiate_sandbox(workdir, sandbox_kind, docker_config)?;
     let mut reports = Vec::new();
     for block in subset {
         let report = runner::execute(block, sandbox.as_mut())
@@ -144,10 +175,18 @@ fn run_blocks(
     Ok(())
 }
 
-fn instantiate_sandbox(workdir: &Path, kind: SandboxChoice) -> Result<Box<dyn Sandbox>> {
+fn instantiate_sandbox(
+    workdir: &Path,
+    kind: SandboxChoice,
+    docker: &DockerConfig,
+) -> Result<Box<dyn Sandbox>> {
     match kind {
         SandboxChoice::Host => Ok(Box::new(HostSandbox::new(workdir))),
-        SandboxChoice::Docker => Ok(Box::new(DockerSandbox::new(workdir))),
+        SandboxChoice::Docker => Ok(Box::new(DockerSandbox::new(
+            workdir,
+            docker.image.clone(),
+            docker.extra_args.clone(),
+        ))),
         SandboxChoice::Wasm => Ok(Box::new(WasmSandbox::new(workdir))),
     }
 }
@@ -174,17 +213,42 @@ mod tests {
     }
 
     #[test]
+    fn docker_cli_flags_capture_configuration() {
+        let cli = Cli::try_parse_from([
+            "runme",
+            "--sandbox",
+            "docker",
+            "--docker-image",
+            "custom:tag",
+            "--docker-arg=--env=FOO=bar",
+            "--docker-arg=--cpus=1",
+            "list",
+        ])
+        .expect("parse docker options");
+        assert_eq!(cli.docker_image.as_deref(), Some("custom:tag"));
+        assert_eq!(
+            cli.docker_args,
+            vec!["--env=FOO=bar".to_string(), "--cpus=1".to_string()]
+        );
+    }
+
+    #[test]
     fn instantiate_builds_all_backends() {
-        let host =
-            instantiate_sandbox(Path::new("."), SandboxChoice::Host).expect("host sandbox exists");
+        let docker_cfg = DockerConfig {
+            image: Some("alpine:3.19".into()),
+            extra_args: vec!["--cpus=1".into()],
+        };
+        let host = instantiate_sandbox(Path::new("."), SandboxChoice::Host, &docker_cfg)
+            .expect("host sandbox exists");
         assert_eq!(host.label(), "host");
 
-        let docker = instantiate_sandbox(Path::new("."), SandboxChoice::Docker)
-            .expect("docker sandbox exists");
+        let docker =
+            instantiate_sandbox(Path::new("."), SandboxChoice::Docker, &docker_cfg.clone())
+                .expect("docker sandbox exists");
         assert_eq!(docker.label(), "docker");
 
-        let wasm =
-            instantiate_sandbox(Path::new("."), SandboxChoice::Wasm).expect("wasm sandbox exists");
+        let wasm = instantiate_sandbox(Path::new("."), SandboxChoice::Wasm, &docker_cfg)
+            .expect("wasm sandbox exists");
         assert_eq!(wasm.label(), "wasm(host-fallback)");
     }
 }

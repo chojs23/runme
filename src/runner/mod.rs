@@ -1,19 +1,20 @@
-//! Execution helpers that transform parsed code blocks into runtime reports.
-//!
-//! The sandbox abstraction here keeps host execution readable while preparing
-//! the ground for Docker/Wasmtime backends without touching CLI surfaces.
+mod docker;
+mod host;
+pub mod sandbox;
+mod wasm;
 
-use std::env;
-use std::ffi::OsString;
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+pub use docker::DockerSandbox;
+pub use host::HostSandbox;
+pub use sandbox::Sandbox;
+pub use wasm::WasmSandbox;
+
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
+use shlex;
 
 use crate::markdown::CodeBlock;
-use shlex;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -49,148 +50,6 @@ impl BlockReport {
             stdout: None,
             stderr: None,
         }
-    }
-}
-
-/// Execution result returned by sandbox implementations.
-#[derive(Clone, Debug)]
-pub struct CommandOutcome {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: Option<i32>,
-    pub success: bool,
-    pub duration: Duration,
-}
-
-impl CommandOutcome {
-    pub fn from_output(output: std::process::Output, duration: Duration) -> Self {
-        Self {
-            stdout: normalize_stream(&output.stdout),
-            stderr: normalize_stream(&output.stderr),
-            exit_code: output.status.code(),
-            success: output.status.success(),
-            duration,
-        }
-    }
-}
-
-/// Trait implemented by every sandbox backend (host, Docker, Wasm, ...).
-pub trait Sandbox {
-    /// Short label surfaced in reports, e.g. `host` or `docker:ubuntu-22.04`.
-    fn label(&self) -> &str;
-    /// Run a parsed argv vector inside the sandbox environment.
-    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome>;
-}
-
-/// Straightforward sandbox that shells out on the host OS.
-///
-/// Keeping this minimal allows future containerized sandboxes to plug in
-/// without altering block orchestration.
-pub struct HostSandbox {
-    workdir: PathBuf,
-}
-
-impl HostSandbox {
-    pub fn new(workdir: impl Into<PathBuf>) -> Self {
-        Self {
-            workdir: workdir.into(),
-        }
-    }
-}
-
-impl Sandbox for HostSandbox {
-    fn label(&self) -> &str {
-        "host"
-    }
-
-    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
-        let (binary, rest) = argv
-            .split_first()
-            .ok_or_else(|| anyhow!("sandbox run requires at least one argument"))?;
-
-        let start = Instant::now();
-        let output = Command::new(binary)
-            .args(rest)
-            .current_dir(&self.workdir)
-            .output()
-            .with_context(|| format!("while invoking {binary} inside host sandbox"))?;
-        let duration = start.elapsed();
-
-        Ok(CommandOutcome::from_output(output, duration))
-    }
-}
-
-/// Docker sandbox that runs each line inside a disposable container.
-///
-/// Environment variables:
-/// - `RUNME_DOCKER_IMAGE`: override the base image (default `ubuntu:22.04`).
-pub struct DockerSandbox {
-    mount_dir: PathBuf,
-    image: String,
-}
-
-impl DockerSandbox {
-    pub fn new(workdir: impl Into<PathBuf>) -> Self {
-        let workdir = workdir.into();
-        let mount_dir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
-        let image = env::var("RUNME_DOCKER_IMAGE").unwrap_or_else(|_| "ubuntu:22.04".to_string());
-        Self { mount_dir, image }
-    }
-}
-
-impl Sandbox for DockerSandbox {
-    fn label(&self) -> &str {
-        "docker"
-    }
-
-    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
-        let mut volume_spec = OsString::new();
-        volume_spec.push(&self.mount_dir);
-        volume_spec.push(":");
-        volume_spec.push("/workspace");
-
-        let mut cmd = Command::new("docker");
-        cmd.arg("run")
-            .arg("--rm")
-            .arg("--network=none")
-            .arg("-v")
-            .arg(&volume_spec)
-            .arg("-w")
-            .arg("/workspace")
-            .arg(&self.image)
-            .args(argv);
-
-        let start = Instant::now();
-        let output = cmd.output().context("while invoking docker")?;
-        let duration = start.elapsed();
-
-        Ok(CommandOutcome::from_output(output, duration))
-    }
-}
-
-/// Placeholder Wasm sandbox that executes commands on the host until
-/// Wasmtime-based runners are ready. This keeps the API stable while we build
-/// the actual runtime adapter.
-pub struct WasmSandbox {
-    host_fallback: HostSandbox,
-}
-
-impl WasmSandbox {
-    pub fn new(workdir: impl Into<PathBuf>) -> Self {
-        Self {
-            host_fallback: HostSandbox::new(workdir),
-        }
-    }
-}
-
-impl Sandbox for WasmSandbox {
-    fn label(&self) -> &str {
-        "wasm(host-fallback)"
-    }
-
-    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
-        // TODO: spin up Wasmtime modules to execute supported languages.
-        self.host_fallback.run(argv)
     }
 }
 
@@ -277,14 +136,10 @@ pub fn execute(block: &CodeBlock, sandbox: &mut dyn Sandbox) -> Result<BlockRepo
     })
 }
 
-fn normalize_stream(stream: &[u8]) -> String {
-    let text = String::from_utf8_lossy(stream);
-    text.trim().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     /// Helper to craft a shell-ready block while keeping headings/context realistic.
     fn shell_block(script: &str) -> CodeBlock {
@@ -388,5 +243,25 @@ mod tests {
             report.skip_reason.as_deref(),
             Some("Block only had comments/blank lines")
         );
+    }
+
+    #[test]
+    fn docker_sandbox_prefers_cli_image_over_env() {
+        const KEY: &str = "RUNME_DOCKER_IMAGE";
+        let previous = env::var(KEY).ok();
+        unsafe {
+            env::set_var(KEY, "env:image");
+        }
+        let from_env = DockerSandbox::new(".", None, Vec::new());
+        assert_eq!(from_env.image(), "env:image");
+
+        let from_cli = DockerSandbox::new(".", Some("cli:image".into()), vec!["--cpus=1".into()]);
+        assert_eq!(from_cli.image(), "cli:image");
+        assert_eq!(from_cli.extra_args(), ["--cpus=1"]);
+
+        match previous {
+            Some(val) => unsafe { env::set_var(KEY, val) },
+            None => unsafe { env::remove_var(KEY) },
+        }
     }
 }
