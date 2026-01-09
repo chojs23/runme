@@ -52,6 +52,7 @@ pub fn extract_blocks(markdown: &str) -> Result<Vec<CodeBlock>> {
 
     let mut collecting_block = false;
     let mut block_language: Option<String> = None;
+    let mut block_inline_name: Option<String> = None;
     let mut block_content = String::new();
 
     let mut idx: usize = 0;
@@ -76,17 +77,33 @@ pub fn extract_blocks(markdown: &str) -> Result<Vec<CodeBlock>> {
                 }
             }
             Event::Html(html) => {
-                if is_skip_directive(&html) {
-                    pending_skip = Some("Marked with runme:ignore".to_string());
-                } else if let Some(name) = extract_name_directive(&html) {
-                    pending_name = Some(name);
+                if let Some((kind, value)) = parse_directive(&html) {
+                    match kind {
+                        DirectiveKind::Ignore => {
+                            pending_skip =
+                                Some(value.unwrap_or_else(|| "Marked with runme:ignore".into()))
+                        }
+                        DirectiveKind::Name => {
+                            if let Some(name) = value {
+                                pending_name = Some(name);
+                            }
+                        }
+                    }
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 collecting_block = true;
                 block_content.clear();
+                block_inline_name = None;
                 block_language = match kind {
-                    CodeBlockKind::Fenced(info) => normalize_info_string(&info),
+                    CodeBlockKind::Fenced(info) => {
+                        let meta = parse_fence_meta(&info);
+                        block_inline_name = meta.name;
+                        if meta.ignore {
+                            pending_skip = Some("Marked with runme:ignore".to_string());
+                        }
+                        meta.language
+                    }
                     CodeBlockKind::Indented => None,
                 };
             }
@@ -104,7 +121,7 @@ pub fn extract_blocks(markdown: &str) -> Result<Vec<CodeBlock>> {
                 let id = format!("block-{idx:03}");
                 blocks.push(CodeBlock {
                     id,
-                    name: pending_name.take(),
+                    name: pending_name.take().or_else(|| block_inline_name.take()),
                     language: block_language.clone(),
                     headings: heading_stack.iter().map(|h| h.title.clone()).collect(),
                     content: block_content.trim().to_string(),
@@ -169,17 +186,64 @@ fn heading_depth(level: HeadingLevel) -> u32 {
     }
 }
 
-fn normalize_info_string(info: &CowStr) -> Option<String> {
-    let raw = info.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(raw.split_whitespace().next().unwrap().to_ascii_lowercase())
+#[derive(Default)]
+struct FenceMeta {
+    language: Option<String>,
+    name: Option<String>,
+    ignore: bool,
 }
 
-fn is_skip_directive(html: &CowStr) -> bool {
-    let normalized = html.trim().to_ascii_lowercase();
-    normalized.contains("runme:ignore") || normalized.contains("runme:skip")
+fn parse_fence_meta(info: &CowStr) -> FenceMeta {
+    let raw = info.trim();
+    if raw.is_empty() {
+        return FenceMeta::default();
+    }
+
+    let mut meta = FenceMeta::default();
+    for token in raw.split_whitespace() {
+        let token_lower = token.to_ascii_lowercase();
+        if token_lower == "runme:ignore" || token_lower == "runme:skip" {
+            meta.ignore = true;
+        } else if let Some((key, value)) = token.split_once('=') {
+            let key_lower = key.to_ascii_lowercase();
+            if key_lower == "runme:name" && !value.is_empty() {
+                meta.name = Some(value.to_string());
+            }
+        } else if meta.language.is_none() {
+            meta.language = Some(token.to_ascii_lowercase());
+        }
+    }
+
+    meta
+}
+
+#[derive(Clone, Copy)]
+enum DirectiveKind {
+    Ignore,
+    Name,
+}
+
+fn parse_directive(html: &CowStr) -> Option<(DirectiveKind, Option<String>)> {
+    let raw = html.trim();
+    if !(raw.starts_with("<!--") && raw.ends_with("-->")) {
+        return None;
+    }
+    let inner = raw
+        .trim_start_matches("<!--")
+        .trim_end_matches("-->")
+        .trim();
+    let lower = inner.to_ascii_lowercase();
+    if lower.starts_with("runme:ignore") || lower.starts_with("runme:skip") {
+        Some((DirectiveKind::Ignore, None))
+    } else if lower.starts_with("runme:name") {
+        let name = inner[10..].trim();
+        Some((
+            DirectiveKind::Name,
+            (!name.is_empty()).then(|| name.to_string()),
+        ))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -233,25 +297,19 @@ echo hi
         let blocks = extract_blocks(doc).expect("parse");
         assert_eq!(blocks[0].name.as_deref(), Some("install-deps"));
     }
-}
 
-fn extract_name_directive(html: &CowStr) -> Option<String> {
-    let raw = html.trim();
-    if !raw.starts_with("<!--") || !raw.ends_with("-->") {
-        return None;
-    }
-    let inner = raw
-        .trim_start_matches("<!--")
-        .trim_end_matches("-->")
-        .trim();
-    let lower = inner.to_ascii_lowercase();
-    if !lower.starts_with("runme:name") {
-        return None;
-    }
-    let name = inner[10..].trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
+    #[test]
+    fn captures_inline_name_and_ignore() {
+        let doc = r#"
+```bash runme:name=inline-demo runme:ignore
+echo hi
+```
+"#;
+        let blocks = extract_blocks(doc).expect("parse");
+        assert_eq!(blocks[0].name.as_deref(), Some("inline-demo"));
+        assert_eq!(
+            blocks[0].skip_reason.as_deref(),
+            Some("Marked with runme:ignore")
+        );
     }
 }
