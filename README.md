@@ -15,9 +15,7 @@ The executor intentionally supports only shell commands today so we can ship qui
 
 ## Quickstart
 
-<!-- runme:ignore quickstart recursion -->
-
-```bash
+```bash <!-- runme:ignore quickstart recursion -->
 cargo run -- list
 cargo run -- run
 cargo run -- run --format json
@@ -33,7 +31,7 @@ cargo run -- --sandbox docker --block block-002 --docker-arg=--env=FOO=bar
 
 The snippet below runs successfully and serves as a smoke test when you execute `runme run`:
 
-```bash
+```bash runme:name=smoke-test
 echo "README blocks stay honest"
 ```
 
@@ -51,4 +49,4 @@ This block shows how to prevent execution when a snippet is unsafe or flaky:
 - Support language-specific plugin bundles (Python, Node, Cargo, etc.).
 - Wire a GitHub Action that reports README drift on pull requests.
 - Cache dependencies per block hash for faster reruns.
-- Name runnable blocks either by placing `<!-- runme:name my-friendly-label -->` immediately before the fenced code or by adding `runme:name=my-friendly-label` after the fence info string (e.g., ```` ```bash runme:name=my-friendly-label ````); then invoke the block with `--block my-friendly-label`.
+- Name runnable blocks either by placing `<!-- runme:name my-friendly-label -->` immediately before the fenced code or by adding `runme:name=my-friendly-label` after the fence info string (e.g., ` ```bash runme:name=my-friendly-label `); then invoke the block with `--block my-friendly-label`.

@@ -1,6 +1,7 @@
 mod markdown;
 mod runner;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -101,6 +102,7 @@ fn main() -> Result<()> {
     let markdown = fs::read_to_string(&cli.target)
         .with_context(|| format!("while reading {}", cli.target.display()))?;
     let blocks = markdown::extract_blocks(&markdown)?;
+    warn_duplicate_names(&blocks);
 
     let workdir = cli
         .target
@@ -201,6 +203,26 @@ fn instantiate_sandbox(
             docker.extra_args.clone(),
         ))),
         SandboxChoice::Wasm => Ok(Box::new(WasmSandbox::new(workdir))),
+    }
+}
+
+fn warn_duplicate_names(blocks: &[CodeBlock]) {
+    let mut map: HashMap<&str, Vec<&str>> = HashMap::new();
+    for block in blocks {
+        if let Some(name) = block.name.as_deref() {
+            map.entry(name).or_default().push(block.id.as_str());
+        }
+    }
+
+    let mut duplicates: Vec<_> = map.into_iter().filter(|(_, ids)| ids.len() > 1).collect();
+    duplicates.sort_by_key(|(name, _)| *name);
+
+    for (name, ids) in duplicates {
+        let list = ids.join(", ");
+        eprintln!(
+            "warning: runme:name '{}' is used by multiple blocks ({list}); `--block {name}` will target the first match.",
+            name
+        );
     }
 }
 
