@@ -13,6 +13,8 @@ use serde::Serialize;
 pub struct CodeBlock {
     /// Stable identifier assigned by discovery order, e.g. `block-001`.
     pub id: String,
+    /// Optional human-readable name provided via `runme:name`.
+    pub name: Option<String>,
     /// Language info string (lowercase) when provided.
     pub language: Option<String>,
     /// Heading hierarchy providing context for reporter output.
@@ -46,6 +48,7 @@ pub fn extract_blocks(markdown: &str) -> Result<Vec<CodeBlock>> {
     let mut heading_stack: Vec<Heading> = Vec::new();
     let mut active_heading: Option<HeadingBuilder> = None;
     let mut pending_skip: Option<String> = None;
+    let mut pending_name: Option<String> = None;
 
     let mut collecting_block = false;
     let mut block_language: Option<String> = None;
@@ -75,6 +78,8 @@ pub fn extract_blocks(markdown: &str) -> Result<Vec<CodeBlock>> {
             Event::Html(html) => {
                 if is_skip_directive(&html) {
                     pending_skip = Some("Marked with runme:ignore".to_string());
+                } else if let Some(name) = extract_name_directive(&html) {
+                    pending_name = Some(name);
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -99,6 +104,7 @@ pub fn extract_blocks(markdown: &str) -> Result<Vec<CodeBlock>> {
                 let id = format!("block-{idx:03}");
                 blocks.push(CodeBlock {
                     id,
+                    name: pending_name.take(),
                     language: block_language.clone(),
                     headings: heading_stack.iter().map(|h| h.title.clone()).collect(),
                     content: block_content.trim().to_string(),
@@ -214,5 +220,38 @@ echo off
             blocks[0].skip_reason.as_deref(),
             Some("Marked with runme:ignore")
         );
+    }
+
+    #[test]
+    fn captures_name_directive() {
+        let doc = r#"
+<!-- runme:name install-deps -->
+```bash
+echo hi
+```
+"#;
+        let blocks = extract_blocks(doc).expect("parse");
+        assert_eq!(blocks[0].name.as_deref(), Some("install-deps"));
+    }
+}
+
+fn extract_name_directive(html: &CowStr) -> Option<String> {
+    let raw = html.trim();
+    if !raw.starts_with("<!--") || !raw.ends_with("-->") {
+        return None;
+    }
+    let inner = raw
+        .trim_start_matches("<!--")
+        .trim_end_matches("-->")
+        .trim();
+    let lower = inner.to_ascii_lowercase();
+    if !lower.starts_with("runme:name") {
+        return None;
+    }
+    let name = inner[10..].trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }

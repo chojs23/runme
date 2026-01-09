@@ -51,3 +51,4 @@ This block shows how to prevent execution when a snippet is unsafe or flaky:
 - Support language-specific plugin bundles (Python, Node, Cargo, etc.).
 - Wire a GitHub Action that reports README drift on pull requests.
 - Cache dependencies per block hash for faster reruns.
+- Name runnable blocks by placing `<!-- runme:name my-friendly-label -->` immediately before the fenced code; then invoke it with `--block my-friendly-label`.

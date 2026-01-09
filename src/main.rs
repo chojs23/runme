@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use markdown::CodeBlock;
 use runner::{BlockReport, DockerSandbox, HostSandbox, Sandbox, WasmSandbox};
 
@@ -34,6 +34,9 @@ struct Cli {
     #[arg(long = "docker-arg", value_name = "ARG", action = ArgAction::Append)]
     docker_args: Vec<String>,
 
+    #[command(flatten)]
+    run: RunArgs,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -43,20 +46,32 @@ enum Command {
     /// List discovered blocks with metadata but do not execute them.
     List,
     /// Execute runnable blocks, optionally targeting a subset.
-    Run {
-        /// Single block identifier (e.g. block-002) to execute.
-        #[arg(long)]
-        block: Option<String>,
-        /// Output format for reports.
-        #[arg(long, default_value_t = ReportFormat::Human, value_enum)]
-        format: ReportFormat,
-    },
+    Run(RunArgs),
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum ReportFormat {
     Human,
     Json,
+}
+
+#[derive(Args, Debug, Clone)]
+struct RunArgs {
+    /// Block identifier (e.g. block-002) or custom name (`runme:name ...`) to execute.
+    #[arg(long)]
+    block: Option<String>,
+    /// Output format for reports.
+    #[arg(long, default_value_t = ReportFormat::Human, value_enum)]
+    format: ReportFormat,
+}
+
+impl Default for RunArgs {
+    fn default() -> Self {
+        Self {
+            block: None,
+            format: ReportFormat::Human,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
@@ -97,19 +112,12 @@ fn main() -> Result<()> {
 
     let docker_config = DockerConfig::from_cli(&cli);
 
-    match cli.command.unwrap_or_else(|| Command::Run {
-        block: None,
-        format: ReportFormat::Human,
-    }) {
-        Command::List => render_list(&blocks),
-        Command::Run { block, format } => run_blocks(
-            &blocks,
-            &workdir,
-            block.as_deref(),
-            cli.sandbox,
-            &docker_config,
-            format,
-        )?,
+    match &cli.command {
+        Some(Command::List) => render_list(&blocks),
+        Some(Command::Run(run_args)) => {
+            run_blocks(&blocks, &workdir, run_args, cli.sandbox, &docker_config)?
+        }
+        None => run_blocks(&blocks, &workdir, &cli.run, cli.sandbox, &docker_config)?,
     }
 
     Ok(())
@@ -124,36 +132,40 @@ fn render_list(blocks: &[CodeBlock]) {
         } else {
             block.headings.join(" › ")
         };
+        let display_id = if let Some(name) = &block.name {
+            format!("{} ({})", block.id, name)
+        } else {
+            block.id.clone()
+        };
         let skip_hint = block
             .skip_reason
             .as_ref()
             .map(|reason| format!(" (skip: {reason})"))
             .unwrap_or_default();
-        println!("- {} [{}] {headings}{skip_hint}", block.id, label);
+        println!("- {} [{}] {headings}{skip_hint}", display_id, label);
     }
 }
 
 fn run_blocks(
     blocks: &[CodeBlock],
     workdir: &Path,
-    filter: Option<&str>,
+    run_args: &RunArgs,
     sandbox_kind: SandboxChoice,
     docker_config: &DockerConfig,
-    format: ReportFormat,
 ) -> Result<()> {
-    let subset: Vec<&CodeBlock> = match filter {
-        Some(id) => {
+    let subset: Vec<&CodeBlock> = match run_args.block.as_deref() {
+        Some(key) => {
             let block = blocks
                 .iter()
-                .find(|block| block.id == id)
-                .with_context(|| format!("unknown block id {id}"))?;
+                .find(|block| block.id == key || block.name.as_deref() == Some(key))
+                .with_context(|| format!("unknown block id or name {key}"))?;
             vec![block]
         }
         None => blocks.iter().collect(),
     };
 
     let mut sandbox = instantiate_sandbox(workdir, sandbox_kind, docker_config)?;
-    let stream_live = matches!(format, ReportFormat::Human);
+    let stream_live = matches!(run_args.format, ReportFormat::Human);
     let mut reports = Vec::new();
     for block in subset {
         let report = runner::execute(block, sandbox.as_mut(), stream_live)
@@ -161,7 +173,7 @@ fn run_blocks(
         reports.push(report);
     }
 
-    match format {
+    match run_args.format {
         ReportFormat::Human => {
             for report in &reports {
                 print_human_report(report, stream_live);
@@ -234,6 +246,14 @@ mod tests {
     }
 
     #[test]
+    fn run_args_parse_without_run_subcommand() {
+        let cli = Cli::try_parse_from(["runme", "--block", "block-123"])
+            .expect("parse implicit run options");
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.block.as_deref(), Some("block-123"));
+    }
+
+    #[test]
     fn instantiate_builds_all_backends() {
         let docker_cfg = DockerConfig {
             image: Some("alpine:3.19".into()),
@@ -255,7 +275,12 @@ mod tests {
 }
 
 fn print_human_report(report: &BlockReport, streamed: bool) {
-    println!("\n== {} ==", report.id);
+    let header = if let Some(name) = &report.name {
+        format!("{} ({})", report.id, name)
+    } else {
+        report.id.clone()
+    };
+    println!("\n== {header} ==");
     if let Some(lang) = &report.language {
         println!("language: {lang}");
     }

@@ -28,6 +28,7 @@ pub enum BlockStatus {
 #[derive(Clone, Debug, Serialize)]
 pub struct BlockReport {
     pub id: String,
+    pub name: Option<String>,
     pub headings: Vec<String>,
     pub language: Option<String>,
     pub sandbox: Option<String>,
@@ -42,6 +43,7 @@ impl BlockReport {
     fn from_skip(block: &CodeBlock, reason: String) -> Self {
         Self {
             id: block.id.clone(),
+            name: block.name.clone(),
             headings: block.headings.clone(),
             language: block.language.clone(),
             sandbox: None,
@@ -102,7 +104,7 @@ pub fn execute(
         executed_lines += 1;
 
         let mut transcript = CommandTranscript::new(trimmed);
-        let mut sink = TranscriptSink::new(&mut transcript, stream_live.then(|| block.id.as_str()));
+        let mut sink = TranscriptSink::new(&mut transcript, stream_live.then_some(block));
         let outcome = sandbox
             .run(&args, &mut sink)
             .with_context(|| format!("while executing {} line {}", block.id, idx + 1))?;
@@ -132,6 +134,7 @@ pub fn execute(
 
     Ok(BlockReport {
         id: block.id.clone(),
+        name: block.name.clone(),
         headings: block.headings.clone(),
         language: block.language.clone(),
         sandbox: Some(sandbox_label),
@@ -187,14 +190,14 @@ impl<'a> CommandTranscript<'a> {
 
 struct TranscriptSink<'a, 'b> {
     transcript: &'a mut CommandTranscript<'b>,
-    streamer: Option<HumanStreamer<'b>>,
+    streamer: Option<HumanStreamer>,
 }
 
 impl<'a, 'b> TranscriptSink<'a, 'b> {
-    fn new(transcript: &'a mut CommandTranscript<'b>, block_id: Option<&'b str>) -> Self {
+    fn new(transcript: &'a mut CommandTranscript<'b>, block: Option<&'b CodeBlock>) -> Self {
         Self {
             transcript,
-            streamer: block_id.map(HumanStreamer::new),
+            streamer: block.map(HumanStreamer::new),
         }
     }
 }
@@ -215,25 +218,30 @@ impl OutputSink for TranscriptSink<'_, '_> {
     }
 }
 
-struct HumanStreamer<'a> {
-    block_id: &'a str,
+struct HumanStreamer {
+    label: String,
 }
 
-impl<'a> HumanStreamer<'a> {
-    fn new(block_id: &'a str) -> Self {
-        Self { block_id }
+impl HumanStreamer {
+    fn new(block: &CodeBlock) -> Self {
+        let label = if let Some(name) = &block.name {
+            format!("{} ({})", block.id, name)
+        } else {
+            block.id.clone()
+        };
+        Self { label }
     }
 
     fn on_stdout(&mut self, command: &str, chunk: &str, first: bool) {
         if first {
-            println!("\x1b[36m[{}]\x1b[0m $ {}", self.block_id, command);
+            println!("\x1b[36m[{}]\x1b[0m $ {}", self.label, command);
         }
         println!("{chunk}");
     }
 
     fn on_stderr(&mut self, command: &str, chunk: &str, first: bool) {
         if first {
-            eprintln!("\x1b[31m[{}]\x1b[0m $ {} (stderr)", self.block_id, command);
+            eprintln!("\x1b[31m[{}]\x1b[0m $ {} (stderr)", self.label, command);
         }
         eprintln!("\x1b[31m{chunk}\x1b[0m");
     }
@@ -248,6 +256,7 @@ mod tests {
     fn shell_block(script: &str) -> CodeBlock {
         CodeBlock {
             id: "block-test".into(),
+            name: None,
             headings: vec!["Tests".into()],
             language: Some("bash".into()),
             content: script.trim().to_string(),
