@@ -153,9 +153,10 @@ fn run_blocks(
     };
 
     let mut sandbox = instantiate_sandbox(workdir, sandbox_kind, docker_config)?;
+    let stream_live = matches!(format, ReportFormat::Human);
     let mut reports = Vec::new();
     for block in subset {
-        let report = runner::execute(block, sandbox.as_mut())
+        let report = runner::execute(block, sandbox.as_mut(), stream_live)
             .with_context(|| format!("while running {}", block.id))?;
         reports.push(report);
     }
@@ -163,7 +164,7 @@ fn run_blocks(
     match format {
         ReportFormat::Human => {
             for report in &reports {
-                print_human_report(report);
+                print_human_report(report, stream_live);
             }
         }
         ReportFormat::Json => {
@@ -253,7 +254,7 @@ mod tests {
     }
 }
 
-fn print_human_report(report: &BlockReport) {
+fn print_human_report(report: &BlockReport, streamed: bool) {
     println!("\n== {} ==", report.id);
     if let Some(lang) = &report.language {
         println!("language: {lang}");
@@ -268,14 +269,16 @@ fn print_human_report(report: &BlockReport) {
     if let Some(reason) = &report.skip_reason {
         println!("skip reason: {reason}");
     }
-    if let Some(stdout) = &report.stdout {
-        if !stdout.is_empty() {
-            println!("stdout:\n{stdout}");
+    if !streamed {
+        if let Some(stdout) = &report.stdout {
+            if !stdout.is_empty() {
+                println!("stdout:\n{stdout}");
+            }
         }
-    }
-    if let Some(stderr) = &report.stderr {
-        if !stderr.is_empty() {
-            println!("stderr:\n{stderr}");
+        if let Some(stderr) = &report.stderr {
+            if !stderr.is_empty() {
+                println!("stderr:\n{stderr}");
+            }
         }
     }
 }

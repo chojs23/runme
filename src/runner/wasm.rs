@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use super::host::HostSandbox;
-use super::sandbox::{CommandOutcome, Sandbox};
+use super::sandbox::{CommandStatus, OutputSink, Sandbox};
 
 /// Placeholder Wasm sandbox that executes commands on the host until
 /// Wasmtime-based runners are ready. This keeps the API stable while we build
@@ -25,8 +25,8 @@ impl Sandbox for WasmSandbox {
         "wasm(host-fallback)"
     }
 
-    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
+    fn run(&mut self, argv: &[String], sink: &mut dyn OutputSink) -> Result<CommandStatus> {
         // TODO: spin up Wasmtime modules to execute supported languages.
-        self.host_fallback.run(argv)
+        self.host_fallback.run(argv, sink)
     }
 }

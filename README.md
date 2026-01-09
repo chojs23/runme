@@ -6,8 +6,8 @@
 
 1. Parse `README.md` (and soon, other docs) with `pulldown-cmark`.
 2. Create structured block metadata that tracks headings, inferred language, and skip hints.
-3. Run shell-flavored blocks with `sh -c` inside the repo root.
-4. Report success or failure as human text or JSON.
+3. Run shell-flavored blocks via a sandbox (host shell by default, Docker via `--sandbox docker`).
+4. Report success or failure as human text (with live, colorized streaming) or JSON.
 
 The executor intentionally supports only shell commands today so we can ship quickly, then grow into container and Wasm sandboxes.
 
@@ -20,11 +20,14 @@ The executor intentionally supports only shell commands today so we can ship qui
 ```bash
 cargo run -- list
 cargo run -- run
+cargo run -- run --format json
+cargo run -- --sandbox docker --block block-002 --docker-arg=--env=FOO=bar
 ```
 
 - `list` only prints metadata.
 - `run` executes every runnable block; add `--block block-002` to target a specific block.
-- Add `--format json` to `run` for machine-readable logs.
+- Add `--format json` to `run` for machine-readable logs; omit it to see live, colorized stdout/stderr as each command runs.
+- Use `--sandbox docker` to isolate commands inside a container (override the image with `--docker-image` or `RUNME_DOCKER_IMAGE`, and forward additional docker flags with repeated `--docker-arg`).
 
 ## Sample blocks inside this README
 
@@ -48,7 +51,3 @@ This block shows how to prevent execution when a snippet is unsafe or flaky:
 - Support language-specific plugin bundles (Python, Node, Cargo, etc.).
 - Wire a GitHub Action that reports README drift on pull requests.
 - Cache dependencies per block hash for faster reruns.
-
-## Implementation map
-
-See `PROJECT_PLAN.md` for the phased rollout plan.

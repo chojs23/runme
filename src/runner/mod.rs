@@ -15,6 +15,7 @@ use serde::Serialize;
 use shlex;
 
 use crate::markdown::CodeBlock;
+use sandbox::OutputSink;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -54,7 +55,11 @@ impl BlockReport {
 }
 
 /// Execute a parsed code block using a shell interpreter when possible.
-pub fn execute(block: &CodeBlock, sandbox: &mut dyn Sandbox) -> Result<BlockReport> {
+pub fn execute(
+    block: &CodeBlock,
+    sandbox: &mut dyn Sandbox,
+    stream_live: bool,
+) -> Result<BlockReport> {
     if let Some(reason) = block.skip_reason.clone() {
         return Ok(BlockReport::from_skip(block, reason));
     }
@@ -96,15 +101,17 @@ pub fn execute(block: &CodeBlock, sandbox: &mut dyn Sandbox) -> Result<BlockRepo
         }
         executed_lines += 1;
 
+        let mut transcript = CommandTranscript::new(trimmed);
+        let mut sink = TranscriptSink::new(&mut transcript, stream_live.then(|| block.id.as_str()));
         let outcome = sandbox
-            .run(&args)
+            .run(&args, &mut sink)
             .with_context(|| format!("while executing {} line {}", block.id, idx + 1))?;
 
-        if !outcome.stdout.is_empty() {
-            stdout_chunks.push(format!("$ {trimmed}\n{}", outcome.stdout));
+        if let Some(line_stdout) = transcript.stdout {
+            stdout_chunks.push(line_stdout);
         }
-        if !outcome.stderr.is_empty() {
-            stderr_chunks.push(format!("$ {trimmed}\n{}", outcome.stderr));
+        if let Some(line_stderr) = transcript.stderr {
+            stderr_chunks.push(line_stderr);
         }
         total_duration += outcome.duration;
 
@@ -136,6 +143,102 @@ pub fn execute(block: &CodeBlock, sandbox: &mut dyn Sandbox) -> Result<BlockRepo
     })
 }
 
+struct CommandTranscript<'a> {
+    command: &'a str,
+    stdout: Option<String>,
+    stderr: Option<String>,
+}
+
+impl<'a> CommandTranscript<'a> {
+    fn new(command: &'a str) -> Self {
+        Self {
+            command,
+            stdout: None,
+            stderr: None,
+        }
+    }
+
+    fn append_stdout(&mut self, chunk: &str) -> bool {
+        if chunk.is_empty() {
+            return false;
+        }
+        let first = self.stdout.is_none();
+        let entry = self
+            .stdout
+            .get_or_insert_with(|| format!("$ {}\n", self.command));
+        entry.push_str(chunk);
+        entry.push('\n');
+        first
+    }
+
+    fn append_stderr(&mut self, chunk: &str) -> bool {
+        if chunk.is_empty() {
+            return false;
+        }
+        let first = self.stderr.is_none();
+        let entry = self
+            .stderr
+            .get_or_insert_with(|| format!("$ {}\n", self.command));
+        entry.push_str(chunk);
+        entry.push('\n');
+        first
+    }
+}
+
+struct TranscriptSink<'a, 'b> {
+    transcript: &'a mut CommandTranscript<'b>,
+    streamer: Option<HumanStreamer<'b>>,
+}
+
+impl<'a, 'b> TranscriptSink<'a, 'b> {
+    fn new(transcript: &'a mut CommandTranscript<'b>, block_id: Option<&'b str>) -> Self {
+        Self {
+            transcript,
+            streamer: block_id.map(HumanStreamer::new),
+        }
+    }
+}
+
+impl OutputSink for TranscriptSink<'_, '_> {
+    fn on_stdout(&mut self, chunk: &str) {
+        let first = self.transcript.append_stdout(chunk);
+        if let Some(streamer) = self.streamer.as_mut() {
+            streamer.on_stdout(self.transcript.command, chunk, first);
+        }
+    }
+
+    fn on_stderr(&mut self, chunk: &str) {
+        let first = self.transcript.append_stderr(chunk);
+        if let Some(streamer) = self.streamer.as_mut() {
+            streamer.on_stderr(self.transcript.command, chunk, first);
+        }
+    }
+}
+
+struct HumanStreamer<'a> {
+    block_id: &'a str,
+}
+
+impl<'a> HumanStreamer<'a> {
+    fn new(block_id: &'a str) -> Self {
+        Self { block_id }
+    }
+
+    fn on_stdout(&mut self, command: &str, chunk: &str, first: bool) {
+        if first {
+            println!("\x1b[36m[{}]\x1b[0m $ {}", self.block_id, command);
+        }
+        println!("{chunk}");
+    }
+
+    fn on_stderr(&mut self, command: &str, chunk: &str, first: bool) {
+        if first {
+            eprintln!("\x1b[31m[{}]\x1b[0m $ {} (stderr)", self.block_id, command);
+        }
+        eprintln!("\x1b[31m{chunk}\x1b[0m");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,7 +267,7 @@ mod tests {
 
         let mut sandbox = host_sandbox();
         let report =
-            execute(&block, &mut sandbox).expect("skip handling should succeed without IO");
+            execute(&block, &mut sandbox, false).expect("skip handling should succeed without IO");
 
         assert!(matches!(report.status, BlockStatus::Skipped));
         assert_eq!(report.skip_reason.as_deref(), Some("user opted out"));
@@ -179,8 +282,8 @@ mod tests {
         };
 
         let mut sandbox = host_sandbox();
-        let report =
-            execute(&block, &mut sandbox).expect("unsupported languages still yield clean reports");
+        let report = execute(&block, &mut sandbox, false)
+            .expect("unsupported languages still yield clean reports");
 
         assert!(matches!(report.status, BlockStatus::Skipped));
         assert!(
@@ -198,7 +301,8 @@ mod tests {
         let block = shell_block("echo runner-ok");
 
         let mut sandbox = host_sandbox();
-        let report = execute(&block, &mut sandbox).expect("echo should succeed on every platform");
+        let report =
+            execute(&block, &mut sandbox, false).expect("echo should succeed on every platform");
 
         assert!(matches!(report.status, BlockStatus::Passed));
         let stdout = report.stdout.expect("stdout is captured");
@@ -214,7 +318,7 @@ mod tests {
 
         let mut sandbox = host_sandbox();
         let report =
-            execute(&block, &mut sandbox).expect("erroring commands still return a report");
+            execute(&block, &mut sandbox, false).expect("erroring commands still return a report");
 
         match report.status {
             BlockStatus::Failed { exit_code } => {
@@ -236,7 +340,7 @@ mod tests {
 
         let mut sandbox = host_sandbox();
         let report =
-            execute(&block, &mut sandbox).expect("comment-only block is a valid skip case");
+            execute(&block, &mut sandbox, false).expect("comment-only block is a valid skip case");
 
         assert!(matches!(report.status, BlockStatus::Skipped));
         assert_eq!(

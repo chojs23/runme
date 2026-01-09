@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use super::sandbox::{CommandOutcome, Sandbox};
+use super::sandbox::{CommandStatus, OutputSink, Sandbox, spawn_with_streaming};
 
 /// Docker sandbox that runs each line inside a disposable container.
 ///
@@ -52,7 +52,7 @@ impl Sandbox for DockerSandbox {
         "docker"
     }
 
-    fn run(&mut self, argv: &[String]) -> Result<CommandOutcome> {
+    fn run(&mut self, argv: &[String], sink: &mut dyn OutputSink) -> Result<CommandStatus> {
         let mut volume_spec = OsString::new();
         volume_spec.push(&self.mount_dir);
         volume_spec.push(":");
@@ -71,9 +71,7 @@ impl Sandbox for DockerSandbox {
             .args(argv);
 
         let start = Instant::now();
-        let output = cmd.output().context("while invoking docker")?;
-        let duration = start.elapsed();
-
-        Ok(CommandOutcome::from_output(output, duration))
+        let status = spawn_with_streaming(cmd, sink).context("while invoking docker")?;
+        Ok(status.with_duration(start.elapsed()))
     }
 }
